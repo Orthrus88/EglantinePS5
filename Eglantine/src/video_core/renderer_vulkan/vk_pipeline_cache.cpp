@@ -13,6 +13,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstddef>
+#include <cstdlib>
 #include <fstream>
 #include <functional>
 #include <iostream>
@@ -486,7 +487,19 @@ struct DeferredStages {
 size_t GetTotalPipelineWorkers() {
     const size_t max_core_threads =
         std::max<size_t>(static_cast<size_t>(std::thread::hardware_concurrency()), 2ULL) - 1ULL;
-#ifdef __ANDROID__
+#if defined(__PROSPERO__)
+    // The PS5 frontend places background work on seven logical CPUs. The generic desktop count
+    // starts fifteen shader CPU workers and eight driver workers there. RADV's NIR compilation can
+    // transiently use hundreds of MiB per driver worker; Ocarina of Time's first gameplay frame
+    // starts enough mesh-fallback pipelines together to exhaust the process heap. Leave one of the
+    // background CPUs for the serialized driver compiler and one for the other workers.
+    constexpr size_t default_workers = 5;
+    const char* const value = std::getenv("EDEN_PS5_SHADER_CPU_THREADS");
+    if (value == nullptr || value[0] < '1' || value[0] > '9') {
+        return std::min(max_core_threads, default_workers);
+    }
+    return std::clamp<size_t>(std::strtoul(value, nullptr, 10), 1, max_core_threads);
+#elif defined(__ANDROID__)
     const int configured = AndroidSettings::values.pipeline_worker_count.GetValue();
     const int clamped = std::clamp(configured, 2, 8);
     const size_t desired = static_cast<size_t>(clamped);
@@ -755,10 +768,22 @@ PipelineCache::PipelineCache(Tegra::MaxwellDeviceMemoryManager& device_memory_,
         device.SupportsTransformFeedbackProvokingVertexPreservation();
 
     const size_t cpu_threads = GetTotalPipelineWorkers();
+#if defined(__PROSPERO__)
+    // Mesa's pipeline compiler is not bounded by ShaderJobScheduler's estimate. Keep one RADV
+    // compile in flight on the console so a scene's shader burst cannot consume the whole heap.
+    const char* const driver_value = std::getenv("EDEN_PS5_SHADER_DRIVER_THREADS");
+    const size_t driver_threads =
+        driver_value != nullptr && driver_value[0] >= '1' && driver_value[0] <= '9'
+            ? std::clamp<size_t>(std::strtoul(driver_value, nullptr, 10), 1, cpu_threads)
+            : 1;
+#else
     const size_t driver_threads =
         device.HasBrokenParallelShaderCompiling()
             ? 1
             : std::min(cpu_threads, std::max<size_t>(std::thread::hardware_concurrency() / 2, 2));
+#endif
+    LOG_INFO(Render_Vulkan, "Shader jobs: {} CPU workers, {} driver workers", cpu_threads,
+             driver_threads);
     shader_jobs.emplace(VideoCommon::ShaderJobConfig{
         .cpu_threads = cpu_threads,
         .driver_threads = driver_threads,
