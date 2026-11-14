@@ -1,11 +1,13 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstring>
 #include <optional>
 #include <set>
+#include <thread>
 
 #include "common/logging.h"
 #include "common/settings.h"
@@ -46,6 +48,12 @@ std::optional<NvdecCommon::VideoCodec> CodecFromMime(std::string_view mime) {
         return NvdecCommon::VideoCodec::H264;
     }
     return std::nullopt;
+}
+
+// dav1d otherwise creates a worker for every host thread. A 1080p60 movie needs only a few, and
+// the emulator's CPU, GPU-service and presentation threads must keep making progress alongside it.
+int Dav1dThreads() {
+    return static_cast<int>(std::clamp(std::thread::hardware_concurrency() / 2, 2U, 8U));
 }
 
 } // namespace
@@ -145,6 +153,9 @@ Nx2VideoDecoder::Nx2VideoDecoder(std::string_view mime) : impl{std::make_unique<
     impl->context.emplace(*impl->decoder);
     AVCodecContext* const context = impl->context->GetCodecContext();
     const std::string_view decoder_name = impl->decoder->GetCodec()->name;
+    if (decoder_name == "libdav1d") {
+        context->thread_count = Dav1dThreads();
+    }
     const bool gpu = Settings::values.nvdec_emulation.GetValue() == Settings::NvdecEmulation::Gpu;
     if (gpu) {
         impl->hardware.emplace();

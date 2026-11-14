@@ -236,6 +236,13 @@ target_link_libraries(texture_swizzle_tests PRIVATE common Catch2::Catch2WithMai
     ${PLATFORM_LIBRARIES})
 add_test(NAME texture_swizzle_tests COMMAND texture_swizzle_tests)
 
+add_executable(syncpoint_action_tests
+    video_core/syncpoint_actions.cpp
+    ../video_core/host1x/syncpoint_manager.cpp)
+target_link_libraries(syncpoint_action_tests PRIVATE common Catch2::Catch2WithMain Threads::Threads
+    ${PLATFORM_LIBRARIES})
+add_test(NAME syncpoint_action_tests COMMAND syncpoint_action_tests)
+
 add_executable(profile_migration_tests
     common/profile_migration.cpp)
 target_link_libraries(profile_migration_tests PRIVATE common Catch2::Catch2WithMain)
