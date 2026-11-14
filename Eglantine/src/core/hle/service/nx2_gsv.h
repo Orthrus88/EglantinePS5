@@ -3493,6 +3493,11 @@ public:
              "CalculateDecoderImagePoolBuffer"},
             {901, &INx2GraphicsSystemSession::Stub, "VideoInitialize (guessed)"},
             {902, &INx2GraphicsSystemSession::OpenVideoSession, "OpenVideoDecoderSession (guessed)"},
+            // Ocarina of Time sends 903 after the decoder session has flushed, stopped and
+            // finalized its opening movie. The generic unknown-command fallback let the game
+            // continue with a zeroed success reply, but made this teardown depend on the
+            // unimplemented-function path. Preserve that observed reply explicitly.
+            {903, &INx2GraphicsSystemSession::StubReplyZeroed, "VideoFinalize (guessed)"},
             {905, &INx2GraphicsSystemSession::OpenVideoSession, "OpenVideoDecoderSessionWithFlag"},
             {906, &INx2GraphicsSystemSession::OpenVideoSession, "OpenVideoDecoderSessionWithVersion"},
             {1001, &INx2GraphicsSystemSession::Stub, "VideoInitialize2 (guessed)"},
