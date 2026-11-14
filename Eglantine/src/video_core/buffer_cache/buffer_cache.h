@@ -189,10 +189,12 @@ void BufferCache<P>::TickFrame() {
         // title 1's buffers were ~200 MiB of an 8 GB GPU's ~6.8 GB in use, yet this collector
         // ran aggressively every frame on the device-wide figure, evicting up to 64 buffers (and
         // downloading the GPU-written ones, ~5% of the GPU thread) that were recreated later.
-        // Collect when the buffers themselves are large. At 1 GiB it held geometry of scenes
-        // long gone: title 1's title screen grew to ~0.9 GB of buffers in ten minutes.
-        if (buffer_bytes >= 512_MiB) {
-            RunGarbageCollector(buffer_bytes >= 1_GiB);
+        // Collect when the buffers themselves are large or the console's shared pool is short.
+        // At 1 GiB it held geometry of scenes long gone; ignoring pool pressure also left 512 MiB
+        // resident while the guest and texture cache exhausted the final direct-memory block.
+        const bool memory_short = ::Eden::Performance::GraphicsMemoryIsShort();
+        if (buffer_bytes >= 512_MiB || memory_short) {
+            RunGarbageCollector(memory_short || buffer_bytes >= 1_GiB);
         }
     } else if (total_used_memory >= minimum_memory) {
         RunGarbageCollector(total_used_memory >= critical_memory);
