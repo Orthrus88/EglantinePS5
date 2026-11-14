@@ -221,7 +221,7 @@ else()
 
     if (ARCHITECTURE_x86_64)
         add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-mcx16>)
-        if (LINUX OR FREEBSD)
+        if ((LINUX OR FREEBSD) AND CXX_GCC)
             add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-mtls-dialect=gnu2>)
         endif()
     endif()
