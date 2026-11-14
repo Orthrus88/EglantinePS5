@@ -13,7 +13,7 @@ namespace {
 using VideoCommon::StalePages;
 using Runs = std::vector<std::pair<u64, u64>>;
 
-constexpr u64 Page = StalePages::PAGE_SIZE;
+constexpr u64 Page = StalePages::STALE_PAGE_SIZE;
 
 struct Recorder {
     Runs runs;

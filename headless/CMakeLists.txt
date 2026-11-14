@@ -54,7 +54,7 @@ endif()
 # Clang 18 does not accept the upstream GCC TLS-dialect flag. Use the same
 # compiler-rt emulated TLS configuration already qualified by G6 on PS5.
 # Linux must match its system libstdc++'s native TLS ABI.
-foreach(eden_target common core audio_core video_core hid_core network input_common frontend_common shader_recompiler gpu_logging dynarmic)
+foreach(eden_target common core audio_core video_core hid_core network input_common frontend_common shader_recompiler gpu_logging dynarmic tests)
     if(TARGET ${eden_target})
         get_target_property(options ${eden_target} COMPILE_OPTIONS)
         if(options)
@@ -66,6 +66,11 @@ foreach(eden_target common core audio_core video_core hid_core network input_com
         endif()
     endif()
 endforeach()
+if(TARGET tests AND LINUX AND CXX_CLANG)
+    # libstdc++ only declares operator delete(void*, size_t) for Clang when sized
+    # deallocation is explicitly enabled. File-system parser tests instantiate it.
+    target_compile_options(tests PRIVATE -fsized-deallocation)
+endif()
 if(PS5_NATIVE)
     set(COMPILER_RT "${PORT_ROOT}/.deps/compiler-rt-18.1.8")
     file(READ "${COMPILER_RT}/emutls.c" emutls)
