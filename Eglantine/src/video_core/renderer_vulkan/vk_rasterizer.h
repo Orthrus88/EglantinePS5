@@ -367,6 +367,7 @@ private:
         u32 vertex_lines{};
         u32 max_vertices{};
         u32 max_primitives{};
+        u32 primitive_vertices{3};
         std::array<u32, 4> position_lines{};
         bool pending{};
     } mesh_probe;
@@ -385,6 +386,31 @@ private:
     u64 mesh_arena_size{64ULL << 20};
     /// The current submission's arena, after its counter is reset.
     const MeshArena& AcquireMeshArena();
+
+    /// Mesh-emulation staging buffers stay reserved until the draw's commands have been recorded.
+    /// Configure may submit before it records the dispatch that uses them.
+    boost::container::static_vector<StagingBufferRef, 4> mesh_draw_buffers;
+    bool mesh_arena_used{};
+
+    /// Mesh-only emulation knows its output size on the CPU. Suballocate those outputs from one
+    /// buffer per in-flight submission instead of creating a device-local staging buffer for
+    /// every draw (Ocarina issues roughly twenty of these draws per frame).
+    struct MeshOutputArena {
+        vk::Buffer buffer;
+        u64 size{};
+        u64 used{};
+        u64 tick{};
+    };
+    struct MeshOutputAllocation {
+        VkBuffer buffer{};
+        VkDeviceSize offset{};
+        VkDeviceSize size{};
+    };
+    std::vector<MeshOutputArena> mesh_output_arenas;
+    size_t mesh_output_arena_used{~size_t{}};
+    u64 mesh_output_arena_size{64ULL << 20};
+    MeshOutputAllocation AllocateMeshOutput(u64 size);
+    void ReleaseMeshEmulationBuffers();
 
     /// Fast draw (nx2_fast_draw.h): what the last recorded draw left bound.
     struct ReusableDraw {

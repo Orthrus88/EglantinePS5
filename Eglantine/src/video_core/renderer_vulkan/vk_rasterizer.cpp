@@ -34,6 +34,7 @@
 
 #include "common/assert.h"
 #include "common/dkb_frame_trace.h"
+#include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/exception.h"
 #include "common/logging.h"
 #include "common/scope_exit.h"
@@ -300,6 +301,9 @@ void RecordDispatchBarrier(vk::CommandBuffer cmdbuf) {
 }
 } // Anonymous namespace
 
+/// Reads back the mesh emulation's output for the probe frame and logs how many primitives of
+/// PrimitiveVertices() indices it holds: unused slots, primitives with every vertex off screen
+/// and bad indices.
 void RasterizerVulkan::ReadMeshEmulationProbe() {
     const MeshEmulationProbe probe{mesh_probe};
     mesh_probe.pending = false;
@@ -325,14 +329,22 @@ void RasterizerVulkan::ReadMeshEmulationProbe() {
     };
     u64 triangles{}, degenerate{}, outside{}, bad_index{};
     std::string sample;
+    const u32 corners{probe.primitive_vertices};
     for (u32 group = 0; group < probe.groups; ++group) {
         const u64 base{u64{group} * probe.block_words};
         const u64 index_base{base + u64{probe.max_vertices} * probe.vertex_lines};
         for (u32 primitive = 0; primitive < probe.max_primitives; ++primitive) {
-            const std::array<u32, 3> indices{word(index_base + primitive * 3),
-                                             word(index_base + primitive * 3 + 1),
-                                             word(index_base + primitive * 3 + 2)};
-            if (indices[0] == indices[1] && indices[1] == indices[2]) {
+            std::array<u32, 3> storage{};
+            for (u32 corner = 0; corner < corners; ++corner) {
+                storage[corner] = word(index_base + u64{primitive} * corners + corner);
+            }
+            const std::span<const u32> indices{storage.data(), corners};
+            // Slots past the primitive count: 0 0 0 for triangles, the unused marker otherwise.
+            const bool unused{
+                corners == 3
+                    ? indices[0] == indices[1] && indices[1] == indices[2]
+                    : indices[0] == Shader::Backend::SPIRV::MESH_EMULATION_UNUSED_VERTEX};
+            if (unused) {
                 ++degenerate;
                 continue;
             }
@@ -360,9 +372,9 @@ void RasterizerVulkan::ReadMeshEmulationProbe() {
         }
     }
     LOG_INFO(Render_Vulkan,
-             "Mesh emulation probe frame {}: {} groups, {} triangles ({} degenerate slots), {} "
-             "with every vertex off screen, {} with a bad index; first triangles:{}",
-             probe.frame, probe.groups, triangles, degenerate, outside, bad_index, sample);
+             "Mesh emulation probe frame {}: {} groups, {} primitives of {} vertices ({} unused "
+             "slots), {} with every vertex off screen, {} with a bad index; first primitives:{}",
+             probe.frame, probe.groups, triangles, corners, degenerate, outside, bad_index, sample);
 }
 
 const RasterizerVulkan::MeshArena& RasterizerVulkan::AcquireMeshArena() {
@@ -426,6 +438,95 @@ const RasterizerVulkan::MeshArena& RasterizerVulkan::AcquireMeshArena() {
     it->counted = false;
     mesh_arena_current = static_cast<size_t>(std::distance(mesh_arenas.begin(), it));
     return *it;
+}
+
+RasterizerVulkan::MeshOutputAllocation RasterizerVulkan::AllocateMeshOutput(u64 bytes) {
+    const u64 tick{scheduler.CurrentTick()};
+    const u64 alignment{(std::max)(u64{16}, u64{device.GetStorageBufferAlignment()})};
+    bytes = (std::max)(bytes, u64{4});
+
+    const auto take = [&](MeshOutputArena& arena) -> std::optional<MeshOutputAllocation> {
+        const u64 offset{Common::AlignUp(arena.used, alignment)};
+        if (offset > arena.size || bytes > arena.size - offset) {
+            return std::nullopt;
+        }
+        arena.used = offset + bytes;
+        mesh_output_arena_used = static_cast<size_t>(&arena - mesh_output_arenas.data());
+        return MeshOutputAllocation{*arena.buffer, offset, bytes};
+    };
+
+    // A submission may have filled the most recently used arena but still have room in an older
+    // one. Prefer its tightest fit so large arenas remain available for large draws.
+    MeshOutputArena* same_tick{};
+    u64 same_tick_remaining{(std::numeric_limits<u64>::max)()};
+    for (MeshOutputArena& arena : mesh_output_arenas) {
+        if (arena.tick != tick) {
+            continue;
+        }
+        const u64 offset{Common::AlignUp(arena.used, alignment)};
+        if (offset <= arena.size && bytes <= arena.size - offset &&
+            arena.size - (offset + bytes) < same_tick_remaining) {
+            same_tick = &arena;
+            same_tick_remaining = arena.size - (offset + bytes);
+        }
+    }
+    if (same_tick != nullptr) {
+        return *take(*same_tick);
+    }
+
+    // Recycle the smallest completed arena that fits. Its Vulkan allocation remains stable while
+    // thousands of draw outputs come and go inside it.
+    MeshOutputArena* reusable{};
+    for (MeshOutputArena& arena : mesh_output_arenas) {
+        if (!scheduler.IsFree(arena.tick) || arena.size < bytes ||
+            (reusable != nullptr && reusable->size <= arena.size)) {
+            continue;
+        }
+        reusable = &arena;
+    }
+    if (reusable != nullptr) {
+        reusable->tick = tick;
+        reusable->used = 0;
+        return *take(*reusable);
+    }
+
+    const u64 size{(std::max)(mesh_output_arena_size, std::bit_ceil(bytes))};
+    vk::Buffer buffer = memory_allocator.CreateBuffer(
+        VkBufferCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .size = size,
+            .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+            .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            .queueFamilyIndexCount = 0,
+            .pQueueFamilyIndices = nullptr,
+        },
+        MemoryUsage::DeviceLocal);
+    mesh_output_arenas.emplace_back(MeshOutputArena{
+        .buffer = std::move(buffer),
+        .size = size,
+        .used = 0,
+        .tick = tick,
+    });
+    LOG_INFO(Render_Vulkan, "Mesh emulation: created a {} MiB shared output arena ({} total)",
+             size >> 20, mesh_output_arenas.size());
+    return *take(mesh_output_arenas.back());
+}
+
+void RasterizerVulkan::ReleaseMeshEmulationBuffers() {
+    for (StagingBufferRef& ref : mesh_draw_buffers) {
+        staging_pool.FreeDeferred(ref);
+    }
+    mesh_draw_buffers.clear();
+    if (mesh_arena_used) {
+        mesh_arena_used = false;
+        mesh_arenas[mesh_arena_current].tick = scheduler.CurrentTick();
+    }
+    if (mesh_output_arena_used < mesh_output_arenas.size()) {
+        mesh_output_arenas[mesh_output_arena_used].tick = scheduler.CurrentTick();
+        mesh_output_arena_used = ~size_t{};
+    }
 }
 
 RasterizerVulkan::RasterizerVulkan(Core::Frontend::EmuWindow& emu_window_, Tegra::GPU& gpu_,
@@ -832,6 +933,9 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                       render_trace_frame, vs, ps);
         }
     };
+    SCOPE_EXIT {
+        ReleaseMeshEmulationBuffers();
+    };
     namespace Profile = VideoCommon::Nx2Profile;
     namespace FastDraw = VideoCommon::Nx2FastDraw;
     // Latched here, on the thread that draws: turning fast draws on starts with a full resolve,
@@ -913,12 +1017,13 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
 #endif // PS5
     // Task/mesh pipelines: the draw's vertex count is the number of task workgroups.
     mesh_draw = pipeline->IsMeshPipeline();
-    if (mesh_draw && VideoCommon::OotNetwork::SkipMeshDraw(Settings::GetCurrentProgramID(),
-                                                            pipeline->HasTaskStage())) {
+    if (mesh_draw && pipeline->IsEmulatedMesh() &&
+        VideoCommon::OotNetwork::SkipMeshDraw(Settings::GetCurrentProgramID(),
+                                              pipeline->HasTaskStage())) {
         static bool logged{};
         if (!std::exchange(logged, true)) {
             LOG_INFO(Render_Vulkan,
-                     "Ocarina of Time: task draws are skipped "
+                     "Ocarina of Time: emulated task draws are skipped "
                      "(EDEN_OOT_MESH_DRAWS=draw issues them)");
         }
         TraceRenderState(is_indexed, "oot-task-skipped", nullptr);
@@ -945,7 +1050,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         return;
     }
     // Mesh emulation: one output block per mesh workgroup, written by the pipeline's compute
-    // dispatch and drawn as groups * vertices-per-group triangle list vertices.
+    // dispatch and drawn as groups * vertices-per-group point, line or triangle list vertices.
     mesh_emulation_groups = 0;
     mesh_emulation_vertices_per_group = 0;
     if (emulated_mesh) {
@@ -996,13 +1101,20 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
         u64 bytes{};
         if (has_task) {
             const MeshArena& arena{AcquireMeshArena()};
+            mesh_arena_used = true;
             bytes = arena.size;
             pipeline->SetMeshEmulationOutput(*arena.buffer, 0, bytes, groups);
         } else {
             bytes = (std::max)(u64{groups} * block_bytes, u64{4});
-            output = staging_pool.Request(bytes, probe_draw ? MemoryUsage::Download
-                                                            : MemoryUsage::DeviceLocal);
-            pipeline->SetMeshEmulationOutput(output.buffer, output.offset, bytes, groups);
+            if (probe_draw) {
+                output = staging_pool.Request(bytes, MemoryUsage::Download, true);
+                mesh_draw_buffers.push_back(output);
+                pipeline->SetMeshEmulationOutput(output.buffer, output.offset, bytes, groups);
+            } else {
+                const MeshOutputAllocation allocation{AllocateMeshOutput(bytes)};
+                pipeline->SetMeshEmulationOutput(allocation.buffer, allocation.offset,
+                                                 allocation.size, groups);
+            }
         }
         mesh_emulation_indirect = {};
         if (mesh_task_probe.pending && scheduler.IsFree(mesh_task_probe.tick)) {
@@ -1022,7 +1134,8 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                                   render_trace_frame % 60 == 0};
             const auto request = [&](u64 size, MemoryUsage usage = MemoryUsage::DeviceLocal) {
                 size = (std::max)(size, u64{16});
-                const StagingBufferRef ref{staging_pool.Request(size, usage)};
+                const StagingBufferRef ref{staging_pool.Request(size, usage, true)};
+                mesh_draw_buffers.push_back(ref);
                 return std::make_pair(GraphicsPipeline::MeshEmulationBuffer{ref.buffer, ref.offset,
                                                                             size},
                                       ref.mapped_span.subspan(
@@ -1061,6 +1174,7 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
                 .vertex_lines = setup.vertex_lines,
                 .max_vertices = setup.max_vertices,
                 .max_primitives = setup.max_primitives,
+                .primitive_vertices = setup.primitive_vertices,
                 .position_lines = setup.position_lines,
                 .pending = true,
             };
