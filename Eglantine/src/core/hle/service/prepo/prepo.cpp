@@ -4,20 +4,68 @@
 // SPDX-FileCopyrightText: Copyright 2018 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <cstring>
 #include "common/hex_util.h"
 #include "common/logging.h"
 #include "common/uuid.h"
-#include <cstring>
 
 #include "core/core.h"
+#include "core/hle/kernel/k_event.h"
 #include "core/hle/service/acc/profile_manager.h"
 #include "core/hle/service/ipc_helpers.h"
+#include "core/hle/service/kernel_helpers.h"
 #include "core/hle/service/prepo/prepo.h"
 #include "core/hle/service/server_manager.h"
 #include "core/hle/service/service.h"
 #include "core/reporter.h"
 
 namespace Service::PlayReport {
+
+class IReportAsyncContext final : public ServiceFramework<IReportAsyncContext> {
+public:
+    explicit IReportAsyncContext(Core::System& system_)
+        : ServiceFramework{system_, "IAsyncContext"}, service_context{system_, "IAsyncContext"} {
+        static const FunctionInfo functions[] = {
+            {0, &IReportAsyncContext::GetSystemEvent, "GetSystemEvent"},
+            {1, &IReportAsyncContext::Cancel, "Cancel"},
+            {2, &IReportAsyncContext::GetResult, "GetResult"},
+        };
+        RegisterHandlers(functions);
+
+        completion_event = service_context.CreateEvent("IAsyncContext:CompletionEvent");
+        completion_event->Signal(system.Kernel());
+    }
+
+    ~IReportAsyncContext() override {
+        service_context.CloseEvent(completion_event);
+    }
+
+private:
+    void GetSystemEvent(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_PREPO, "called");
+
+        IPC::ResponseBuilder rb{ctx, 2, 1};
+        rb.Push(ResultSuccess);
+        rb.PushCopyObjects(ctx, completion_event->GetReadableEvent());
+    }
+
+    void Cancel(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_PREPO, "called");
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    void GetResult(HLERequestContext& ctx) {
+        LOG_DEBUG(Service_PREPO, "called");
+
+        IPC::ResponseBuilder rb{ctx, 2};
+        rb.Push(ResultSuccess);
+    }
+
+    KernelHelpers::ServiceContext service_context;
+    Kernel::KEvent* completion_event{};
+};
 
 class PlayReport final : public ServiceFramework<PlayReport> {
 public:
@@ -35,6 +83,7 @@ public:
             {10200, &PlayReport::RequestImmediateTransmission, "RequestImmediateTransmission"},
             {10300, &PlayReport::GetTransmissionStatus, "GetTransmissionStatus"},
             {10400, &PlayReport::GetSystemSessionId, "GetSystemSessionId"},
+            {10500, &PlayReport::SendReportWithUser, "SendReportWithUser"},
             {20100, &PlayReport::SaveSystemReportOld, "SaveSystemReport"},
             {20101, &PlayReport::SaveSystemReportWithUserOld, "SaveSystemReportWithUser"},
             {20102, &PlayReport::SaveSystemReport, "SaveSystemReport"},
@@ -129,6 +178,28 @@ private:
         IPC::ResponseBuilder rb{ctx, 4};
         rb.Push(ResultSuccess);
         rb.Push(system_session_id);
+    }
+
+    void SendReportWithUser(HLERequestContext& ctx) {
+        IPC::RequestParser rp{ctx};
+        const auto user_id = rp.PopRaw<u128>();
+        const auto application_id = rp.PopRaw<u64>();
+        const auto flag = rp.PopRaw<u64>();
+        const auto field0 = rp.PopRaw<u32>();
+        const auto field1 = rp.PopRaw<u32>();
+        const auto event_id = ctx.ReadBufferX(0);
+
+        Common::UUID uuid{};
+        std::memcpy(uuid.uuid.data(), user_id.data(), sizeof(Common::UUID));
+
+        LOG_DEBUG(Service_PREPO,
+                  "(STUBBED) called, user_id={}, application_id={:016X}, flag={}, field0={}, "
+                  "field1={}, event_id_size={}",
+                  uuid.FormattedString(), application_id, flag, field0, field1, event_id.size());
+
+        IPC::ResponseBuilder rb{ctx, 2, 0, 1};
+        rb.Push(ResultSuccess);
+        rb.PushIpcInterface<IReportAsyncContext>(ctx, system);
     }
 
     void SaveSystemReportOld(HLERequestContext& ctx) {
