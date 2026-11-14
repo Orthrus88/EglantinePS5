@@ -229,6 +229,11 @@ target_compile_definitions(tests PRIVATE
 
 add_test(NAME tests COMMAND tests)
 
+add_executable(texture_swizzle_tests video_core/texture_swizzle.cpp)
+target_link_libraries(texture_swizzle_tests PRIVATE common video_core Catch2::Catch2WithMain
+    Threads::Threads ${PLATFORM_LIBRARIES})
+add_test(NAME texture_swizzle_tests COMMAND texture_swizzle_tests)
+
 add_executable(profile_migration_tests
     common/profile_migration.cpp)
 target_link_libraries(profile_migration_tests PRIVATE common Catch2::Catch2WithMain)
