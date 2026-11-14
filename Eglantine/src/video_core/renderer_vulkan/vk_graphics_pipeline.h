@@ -159,6 +159,10 @@ public:
     }
 
     /// Switch 2 task/mesh pipeline: drawn with vkCmdDrawMeshTasksEXT.
+    [[nodiscard]] bool HasTaskStage() const noexcept {
+        return stage_infos[0].is_task;
+    }
+
     [[nodiscard]] bool IsMeshPipeline() const noexcept {
         return stage_infos[0].is_task || stage_infos[0].is_mesh;
     }

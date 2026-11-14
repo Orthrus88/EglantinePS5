@@ -29,3 +29,10 @@ TEST_CASE("Ocarina of Time network bypass follows the setting and the game",
 
     setting.SetValue(previous);
 }
+
+TEST_CASE("Ocarina of Time skips task draws but keeps mesh-only draws",
+          "[video_core][oot_network]") {
+    CHECK(SkipMeshDraw(ProgramId, true));
+    CHECK_FALSE(SkipMeshDraw(ProgramId, false));
+    CHECK_FALSE(SkipMeshDraw(0x0400C3F00006E000ULL, true));
+}

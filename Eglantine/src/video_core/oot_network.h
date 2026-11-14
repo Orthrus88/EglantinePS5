@@ -4,6 +4,8 @@
 #pragma once
 
 #include <atomic>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 
 #include "common/common_types.h"
@@ -51,6 +53,25 @@ struct BypassState {
 inline bool BypassEnabled(u64 program_id) {
     return program_id == ProgramId &&
            Settings::values.oot_anti_aliasing.GetValue() == Settings::OotAntiAliasing::NoSharpening;
+}
+
+/// Ocarina's task program reads instance records through graphics pointers that are not bound by
+/// the mesh fallback yet. Mesh-only pipelines are valid and must remain visible.
+inline bool SkipMeshDraw(u64 program_id, bool has_task_stage) {
+    if (program_id != ProgramId) {
+        return false;
+    }
+    static const int mode = [] {
+        const char* value = std::getenv("EDEN_OOT_MESH_DRAWS");
+        if (value != nullptr && std::strcmp(value, "draw") == 0) {
+            return 1;
+        }
+        if (value != nullptr && std::strcmp(value, "skip") == 0) {
+            return 2;
+        }
+        return 0;
+    }();
+    return mode == 2 || (mode == 0 && has_task_stage);
 }
 
 } // namespace VideoCommon::OotNetwork

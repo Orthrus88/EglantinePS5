@@ -913,6 +913,17 @@ void RasterizerVulkan::PrepareDraw(bool is_indexed, Func&& draw_func, bool is_in
 #endif // PS5
     // Task/mesh pipelines: the draw's vertex count is the number of task workgroups.
     mesh_draw = pipeline->IsMeshPipeline();
+    if (mesh_draw && VideoCommon::OotNetwork::SkipMeshDraw(Settings::GetCurrentProgramID(),
+                                                            pipeline->HasTaskStage())) {
+        static bool logged{};
+        if (!std::exchange(logged, true)) {
+            LOG_INFO(Render_Vulkan,
+                     "Ocarina of Time: task draws are skipped "
+                     "(EDEN_OOT_MESH_DRAWS=draw issues them)");
+        }
+        TraceRenderState(is_indexed, "oot-task-skipped", nullptr);
+        return;
+    }
     // EDEN_NX2_NO_MESH=1: skip task/mesh draws as before they were supported (A/B comparisons).
     // EDEN_NX2_NO_MESH_FILE=<path>: skip them while that file exists (checked every 1024 draws),
     // to compare the same scene with and without them in one run.
