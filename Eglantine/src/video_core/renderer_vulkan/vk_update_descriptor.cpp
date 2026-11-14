@@ -19,12 +19,27 @@
 
 namespace Vulkan {
 
+namespace {
+size_t InitialPayloadSize(size_t size) {
+#if defined(__PROSPERO__) // PS5
+    if (size == UpdateDescriptorQueue::GUEST_FRAME_PAYLOAD_SIZE) {
+        return 0x20000;
+    }
+    if (size == UpdateDescriptorQueue::COMPUTE_FRAME_PAYLOAD_SIZE) {
+        return 0x8000;
+    }
+#endif // PS5
+    return size;
+}
+} // Anonymous namespace
+
 UpdateDescriptorQueue::UpdateDescriptorQueue(const Device& device_, size_t frame_payload_size_,
                                              bool supports_descriptor_buffer_)
-    : device{device_}, frame_payload_size{frame_payload_size_},
+    : device{device_}, frame_payload_size{InitialPayloadSize(frame_payload_size_)},
       maximum_frame_payload_size{frame_payload_size_ * 4},
       supports_descriptor_buffer{supports_descriptor_buffer_},
-      payload(std::make_unique_for_overwrite<DescriptorUpdateEntry[]>(frame_payload_size_ * FRAMES_IN_FLIGHT))
+      payload(std::make_unique_for_overwrite<DescriptorUpdateEntry[]>(
+          InitialPayloadSize(frame_payload_size_) * FRAMES_IN_FLIGHT))
 {
     payload_start = payload.get();
     payload_cursor = payload.get();

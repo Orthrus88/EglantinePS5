@@ -271,7 +271,12 @@ private:
         Mapped = 2,
     };
 
+#if defined(__PROSPERO__) // PS5
+    // Two bits per 4 KiB page of the 40-bit GPU space, backed only for mapped regions.
+    Common::SparseLargeVector<u64> entries;
+#else // PS5
     std::vector<u64> entries;
+#endif // PS5
     std::vector<u64> big_entries;
 
     GPUVAddr PageTableOp(GPUVAddr gpu_addr, [[maybe_unused]] DAddr dev_addr, size_t size, PTEKind kind, EntryType entry_type);

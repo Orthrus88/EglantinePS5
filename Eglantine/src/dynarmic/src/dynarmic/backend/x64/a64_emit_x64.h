@@ -61,8 +61,14 @@ public:
         const void* code_ptr = nullptr;
     };
     static_assert(sizeof(FastDispatchEntry) == 0x10);
+#if defined(__PROSPERO__) // PS5
+    // A miss falls back to the block lookup, so use the A32-sized table on the shared-memory PS5.
+    static constexpr u64 fast_dispatch_table_mask = 0xFFFF0;
+    static constexpr size_t fast_dispatch_table_size = 0x10000;
+#else // PS5
     static constexpr u64 fast_dispatch_table_mask = 0xFFFFF0;
     static constexpr size_t fast_dispatch_table_size = 0x100000;
+#endif // PS5
 
     void ClearFastDispatchTable();
     void GenMemory128Accessors();
