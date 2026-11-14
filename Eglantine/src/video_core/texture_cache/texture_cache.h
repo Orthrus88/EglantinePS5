@@ -156,76 +156,33 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
     bool evict_old_costly = false;
     u64 ticks_to_destroy = 0;
     size_t num_iterations = 0;
-    size_t num_scanned = 0;
-    constexpr size_t max_scanned = 8192;
-    const bool memory_short = ::Eden::Performance::GraphicsMemoryIsShort();
-    const bool memory_critical = ::Eden::Performance::GraphicsMemoryIsCritical();
     const auto Configure = [&](bool allow_aggressive) {
-        high_priority_mode = out_of_memory || memory_short || total_used_memory >= expected_memory;
-        aggressive_mode = allow_aggressive &&
-                          (out_of_memory || memory_critical || total_used_memory >= critical_memory);
+        high_priority_mode = out_of_memory || total_used_memory >= expected_memory;
+        aggressive_mode =
+            allow_aggressive && (out_of_memory || total_used_memory >= critical_memory);
         ticks_to_destroy = aggressive_mode ? 10ULL : high_priority_mode ? 25ULL : 50ULL;
         // EDEN_NX2_TC_MIN_AGE=<frames>: never evict images used more recently (thrash tests).
         static const u64 min_age = [] {
             const char* value = std::getenv("EDEN_NX2_TC_MIN_AGE");
             return value != nullptr ? std::strtoull(value, nullptr, 10) : 0ULL;
         }();
-        if (memory_short && !memory_critical && !out_of_memory) {
-            // A short shared pool is not yet an emergency. Taking ten-frame-old ASTC images here
-            // made a loading scene continuously evict and decode its working set. Keep only old
-            // scene data eligible until the pool is actually critical.
-            static const u64 short_age = [] {
-                const char* value = std::getenv("EDEN_NX2_TC_SHORT_AGE");
-                return value != nullptr ? std::strtoull(value, nullptr, 10) : 600ULL;
-            }();
-            aggressive_mode = false;
-            ticks_to_destroy = short_age;
-        }
         ticks_to_destroy = (std::max)(ticks_to_destroy, min_age);
         num_iterations = aggressive_mode ? 40 : (high_priority_mode ? 20 : 10);
-        num_scanned = 0;
-    };
-    const auto KeepLargeDirty = [&](const Image& image) {
-        // Writing a large GPU-modified image back needs another staging allocation and guest
-        // backing before its old allocation can be released. Under shared-pool pressure that can
-        // consume the last usable block instead of freeing memory. Find smaller candidates first.
-        constexpr size_t max_pressure_download = 64_MiB;
-        if (!memory_short || image.unswizzled_size_bytes <= max_pressure_download) {
-            return false;
-        }
-        static u32 kept{};
-        if (kept++ < 8) {
-            LOG_INFO(HW_GPU, "Texture cache: pool short, keeping GPU-written {} MiB at {:#x}",
-                     image.unswizzled_size_bytes >> 20, image.gpu_addr);
-        }
-        return true;
     };
     const auto Cleanup = [this, &num_iterations, &high_priority_mode, &aggressive_mode,
-                          &evict_old_costly, &num_scanned, &KeepLargeDirty, memory_short,
-                          out_of_memory](ImageId image_id) {
-        if (num_iterations == 0 || num_scanned >= max_scanned) {
+                          &evict_old_costly, out_of_memory](ImageId image_id) {
+        if (num_iterations == 0) {
             return true;
         }
-        ++num_scanned;
-        const bool count_visits =
-            ::Eden::Performance::gc_count_visits.load(std::memory_order_relaxed);
-        if (count_visits) {
-            --num_iterations;
-        }
+        --num_iterations;
         auto& image = slot_images[image_id];
         if (True(image.flags & ImageFlagBits::IsDecoding)) {
             return false;
         }
         const bool must_download = IsDownloadable(image) && False(image.flags & ImageFlagBits::BadOverlap);
-        if (must_download && KeepLargeDirty(image)) {
-            return false;
-        }
         if ((!aggressive_mode && !evict_old_costly && True(image.flags & ImageFlagBits::CostlyLoad)) ||
             (!high_priority_mode && must_download)) {
             return false;
-        }
-        if (!count_visits) {
-            --num_iterations;
         }
         if (must_download) {
             auto map = runtime.DownloadStagingBuffer(image.unswizzled_size_bytes);
@@ -247,10 +204,10 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
         if (out_of_memory) {
             return false;
         }
-        if (aggressive_mode && !memory_short && total_used_memory < critical_memory) {
+        if (aggressive_mode && total_used_memory < critical_memory) {
             num_iterations >>= 2;
             aggressive_mode = false;
-        } else if (high_priority_mode && !memory_short && total_used_memory < expected_memory) {
+        } else if (high_priority_mode && total_used_memory < expected_memory) {
             num_iterations >>= 1;
             high_priority_mode = false;
         }
@@ -318,21 +275,9 @@ void TextureCache<P>::RunGarbageCollector(bool out_of_memory) {
         evict_old_costly = false;
     }
     Collect();
-    if (out_of_memory || memory_short || total_used_memory >= critical_memory) {
+    if (out_of_memory || total_used_memory >= critical_memory) {
         Configure(true);
         Collect();
-    }
-    if (memory_critical) {
-        // Once the shared pool is critical, old costly images must no longer shield the scene
-        // data behind them. During a background/loading frame 300 frames is sufficient; during
-        // active rendering, only images unused for ten frames are considered.
-        const u64 pressure_age = ::Eden::AstcPolicy::InBackground() ? 300ULL : 10ULL;
-        if (frame_tick > pressure_age) {
-            Configure(true);
-            evict_old_costly = true;
-            lru_cache.ForEachItemBelow(frame_tick - pressure_age, Cleanup);
-            evict_old_costly = false;
-        }
     }
 }
 
@@ -680,8 +625,7 @@ void TextureCache<P>::TickFrame() {
         out_of_memory = failed != seen_failed_images;
         seen_failed_images = failed;
     }
-    if (out_of_memory || total_used_memory > minimum_memory ||
-        ::Eden::Performance::GraphicsMemoryIsShort()) {
+    if (out_of_memory || total_used_memory > minimum_memory) {
         RunGarbageCollector(out_of_memory);
     }
     if (out_of_memory) {
